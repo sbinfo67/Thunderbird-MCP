@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `mail_save_attachment` now needs `confirm=true` and asks the host to prompt, like
+  every other write that leaves Thunderbird's own state. It was the one tool that
+  could put sender-supplied bytes anywhere on disk unasked: a message could talk the
+  model into saving its attachment to `~/.config/autostart` or the Startup folder,
+  and it would run at the next login.
+
 ## 1.3.0 — 2026-09-08
 
 Every search tool in 1.2.0 was broken, and the bridge could fail in a way nothing
