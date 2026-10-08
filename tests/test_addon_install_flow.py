@@ -76,6 +76,7 @@ def flow(monkeypatch, tmp_path):
         calls["restart"] += 1
 
     monkeypatch.setattr(addon_install, "_stop", stop)
+    monkeypatch.setattr(addon_install, "wait_closed", lambda timeout=60.0: True)
     monkeypatch.setattr(addon_install, "_launch", launch)
     monkeypatch.setattr(addon_install, "_restart_plain", restart)
     monkeypatch.setattr(addon_install.marionette, "wait_for_port", lambda timeout=0: True)
@@ -188,3 +189,29 @@ def test_closed_thunderbird_starts_without_stop(flow, monkeypatch):
     assert outcome.ok
     assert calls["stop"] == 1  # cleanup after the automation session, never before launch
     assert calls["launch"] == [["-marionette", "-remote-allow-system-access"]]
+
+
+def test_the_marionette_quit_is_left_to_finish_before_any_signal(flow, monkeypatch):
+    """Marionette resets its test preferences (password saving, safe browsing and
+    add-on updates off, among about a hundred) only at profile-before-change. A
+    SIGTERM from `_stop` landing mid-shutdown skipped the reset and left them in the
+    user's prefs.js."""
+    events: list[str] = []
+    client = FakeClient({"result": {"ok": True, "version": EXPECTED_VERSION, "isActive": True}})
+    client.quit_application = lambda: events.append("quit")
+    flow(client)
+    monkeypatch.setattr(
+        addon_install, "wait_closed", lambda timeout=60.0: events.append("wait") or True
+    )
+    monkeypatch.setattr(addon_install, "_stop", lambda timeout=60.0: events.append("stop") or True)
+
+    assert addon_install.install_automatic().ok
+    assert events[events.index("quit") :][:2] == ["quit", "wait"]
+
+
+def test_wait_closed_never_signals(monkeypatch):
+    states = iter([True, True, False])
+    monkeypatch.setattr(addon_install, "is_running", lambda: next(states))
+    monkeypatch.setattr(addon_install.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(addon_install.os, "kill", lambda *_a: 1 / 0)
+    assert addon_install.wait_closed()
