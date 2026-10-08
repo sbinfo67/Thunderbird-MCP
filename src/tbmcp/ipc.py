@@ -21,6 +21,20 @@ PROTOCOL_VERSION = 1
 MAX_LINE = 64 * 1024 * 1024  # a raw message body can legitimately be large
 
 
+def newest_source_mtime() -> float:
+    """Latest readable Python source modification time in the tbmcp package."""
+    newest = 0.0
+    try:
+        for path in Path(__file__).parent.rglob("*.py"):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return newest
+
+
 def state_dir() -> Path:
     """Per-user directory for the daemon advertisement, lock and log.
 
@@ -155,7 +169,9 @@ def _restrict_permissions(path: Path) -> None:
             return
         for args in (
             ["icacls", str(path), "/inheritance:r"],
-            ["icacls", str(path), "/grant:r", f"{user}:(R,W)"],
+            # Full control, not (R,W): os.replace over this file on the next start
+            # needs DELETE, and without it every later daemon start fails.
+            ["icacls", str(path), "/grant:r", f"{user}:F"],
         ):
             try:
                 subprocess.run(

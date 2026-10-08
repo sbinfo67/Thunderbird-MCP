@@ -209,7 +209,7 @@ export function fakeWebSocketClass() {
  * @param {object|Function} pairing  what `tbx.readBridgeFile()` resolves to; a
  *   function is called per read, so a test can decide when the read finishes.
  */
-export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9" } = {}) {
+export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9", folders = [] } = {}) {
   const browser = {
     _written: [],
     runtime: {
@@ -232,6 +232,13 @@ export function fakeBrowser({ pairing = null, manifestVersion = "9.9.9" } = {}) 
         get: async () => ({}),
         set: async () => {},
       },
+    },
+    folders: {
+      get: async (id) => folders.find((folder) => folder.id === id),
+      query: async ({ specialUse, isUnified } = {}) => folders.filter((folder) =>
+        (isUnified === undefined || folder.isUnified === isUnified) &&
+        (!specialUse || specialUse.some((type) => folder.specialUse?.includes(type)))
+      ),
     },
   };
   return browser;
@@ -285,6 +292,9 @@ export function fakeMessages({ folders = {}, pageSize = 10, queryPageSize = 100 
     if (queryInfo.subject && !String(header.subject || "").includes(queryInfo.subject)) {
       return false;
     }
+    const date = new Date(header.date).getTime();
+    if (queryInfo.fromDate && date < new Date(queryInfo.fromDate).getTime()) return false;
+    if (queryInfo.toDate && date > new Date(queryInfo.toDate).getTime()) return false;
     if (queryInfo.folderId) {
       const wanted = Array.isArray(queryInfo.folderId) ? queryInfo.folderId : [queryInfo.folderId];
       if (!wanted.includes(folderId)) {
@@ -300,8 +310,9 @@ export function fakeMessages({ folders = {}, pageSize = 10, queryPageSize = 100 
 
   return {
     calls,
-    async list(folderId, options) {
-      calls.push({ method: "list", args: [folderId, options] });
+    async list(folderId, ...options) {
+      calls.push({ method: "list", args: [folderId, ...options] });
+      if (options.length) throw new Error("Incorrect argument types for messages.list.");
       return page(open([...(folders[folderId] || [])], pageSize));
     },
     async query(queryInfo = {}) {
@@ -452,6 +463,13 @@ export function fakeSandbox({ modules = {}, prefs = {} } = {}) {
 
   return {
     ChromeUtils: {
+      base64URLDecode(text, { padding } = {}) {
+        if (!/^[A-Za-z0-9_-]*={0,2}$/.test(text)) {
+          throw new Error("invalid base64url");
+        }
+        const bytes = Uint8Array.from(Buffer.from(text, "base64url"));
+        return bytes.buffer;
+      },
       importESModule(url) {
         if (known[url]) {
           return known[url];

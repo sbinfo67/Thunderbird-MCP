@@ -93,8 +93,9 @@ def render_reference(per_toolset: dict[str, list[dict]]) -> str:
         "Do not edit by hand.",
         "",
         "`read` tools cannot change anything and are the only ones registered under",
-        "`--read-only`. `write` and `destructive` tools require confirmation — an explicit",
-        "`confirm=true`, or an approval prompt where the client supports one.",
+        "`--read-only`. By default, `write` and `destructive` tools require confirmation —",
+        "an explicit `confirm=true`, or an approval prompt where the client supports one.",
+        "[Folder rules](FOLDER-RULES.md) can skip confirmation for selected calls.",
         "",
     ]
     for name, rows in per_toolset.items():

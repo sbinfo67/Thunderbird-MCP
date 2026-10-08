@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- A private daily action log kept for 30 days records every write tool call and its reply. Mail
+  mark, move, copy and archive replies now include per-message undo information.
+- Compose tools accept `inline_images` paths and embed the pictures in HTML mail.
+- `tbmcp refresh` restarts stale daemon code, updates the add-on only when its build
+  changed, and reports stale MCP server processes through `tb_status`.
+
 ### Changed
 
 - `mail_save_attachment` now needs `confirm=true` and asks the host to prompt, like
@@ -9,6 +17,51 @@
   could put sender-supplied bytes anywhere on disk unasked: a message could talk the
   model into saving its attachment to `~/.config/autostart` or the Startup folder,
   and it would run at the next login.
+- Folder rules now load from git-ignored `settings.json` in the repository root
+  (template: `settings.example.json`) instead of `config.toml` in the state directory.
+  The format is JSON.
+
+### Fixed
+
+- `mail_draft_save` and `mail_send` no longer write `null` as the body when
+  the body is missing or empty.
+- `install-addon`, `refresh` and `tools/tb_console.py` ask every Thunderbird window to
+  close and find a closed portable install and its profile from Windows user variables.
+  `install-addon` names windows that refuse to close; `tools\refresh_live.bat` no longer
+  fails when Thunderbird is closed.
+- `install-addon` finds a portable Thunderbird and its profile from the running process;
+  `tools/tb_console.py` now keeps that profile when it restarts Thunderbird.
+
+- Auto-detect portable Thunderbird's running profile, move the pairing file when
+  needed, and show the profile choice and mismatch in status and doctor.
+
+- `mail_draft_save` locates the saved draft and reports its id and folder when
+  Thunderbird omits them from the save response.
+
+- `tb_status` right after the server starts waits for the add-on to attach instead of
+  reporting `connected: false`, and reports `state` (`connected`, `not-running`,
+  `not-attached`).
+
+## 1.3.1 — 2026-09-29
+
+### Added
+
+- `mail_list(special_use="inbox")` returns the newest messages across all account inboxes in one call.
+- Folder rules in `config.toml` (`TBMCP_CONFIG` or `--config`) let `mail_move`,
+  `folder_create`, `folder_rename`, and `folder_delete` (empty subfolders only)
+  run without confirmation inside chosen folders, so headless agents can triage mail.
+
+### Fixed
+
+- `tbmcp doctor` and `tb_status` compare the installed add-on build with the package,
+  so an add-on left over from before a code change is reported even when the version did not change.
+- Date-filtered mail listing and search pass `Date` values to Thunderbird's query API;
+  ISO date strings had made newest-first queries time out on the live add-on.
+- `mail_list` no longer passes unsupported sort arguments to Thunderbird's `messages.list`.
+  Newest-first mail search and listing stop after a recent date window has enough matches.
+- `mail_save_attachment` failed for every attachment with "atob is not defined".
+  The privileged half has no DOM globals, so it now decodes through
+  `ChromeUtils.base64URLDecode`, like `files.write`.
 
 ## 1.3.0 — 2026-09-08
 

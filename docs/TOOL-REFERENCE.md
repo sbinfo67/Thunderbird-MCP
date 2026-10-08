@@ -4,8 +4,9 @@ All 112 tools, generated from the code by `tools/gen_tool_reference.py`.
 Do not edit by hand.
 
 `read` tools cannot change anything and are the only ones registered under
-`--read-only`. `write` and `destructive` tools require confirmation — an explicit
-`confirm=true`, or an approval prompt where the client supports one.
+`--read-only`. By default, `write` and `destructive` tools require confirmation —
+an explicit `confirm=true`, or an approval prompt where the client supports one.
+[Folder rules](FOLDER-RULES.md) can skip confirmation for selected calls.
 
 ## `mail` — 15 tools *(in the default toolset)*
 
@@ -17,22 +18,25 @@ Search the user's mail. Combine `full_text` with any filters below.
 
 `full_text` uses Thunderbird's global index and searches headers and bodies
 of already-indexed messages; `subject`/`author`/`body` are substring matches
-evaluated per folder. Dates are ISO-8601. Results are summaries — call
+evaluated per folder. Dates are ISO-8601. Results come newest first; `sort`
+"oldest" reverses that, "none" returns folder storage order (faster on huge
+result sets). Results are summaries — call
 `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
 carries `scope` — the folder and account ids the query covered — so an empty
 result can be read against what was actually searched.
 
-Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor  
+Parameters: full_text, subject, author, recipients, body, folder_id, account_id, include_subfolders, unread, flagged, junk, has_attachment, tags, tag_mode, from_date, to_date, to_me, from_me, min_size, max_size, limit, cursor, sort  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_list` · read
 
-List messages in one folder, newest first by default.
+List one folder or every folder of a type, newest first by default.
 
-Use `folder_list` to discover folder ids. For anything selective, prefer
-`mail_search`.
+`special_use="inbox"` lists the newest messages of every account's inbox
+in one call — the answer to "what is my newest email". Use `folder_list`
+to discover one folder's id. For selective queries, use `mail_search`.
 
-Parameters: **folder_id**, limit, cursor, sort_by, descending  
+Parameters: folder_id, limit, cursor, sort_by, descending, special_use  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_get` · read
@@ -85,6 +89,7 @@ Set read/flagged/junk state or adjust tags on one or more messages.
 
 Cheap and reversible, so no confirmation is required. Tag keys come from
 `mail_tags`.
+The reply reports each updated message's earlier flags and tags for undo.
 
 Parameters: **message_ids**, read, flagged, junk, add_tags, remove_tags  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -95,6 +100,8 @@ Move messages into another folder.
 
 On IMAP the move is asynchronous — the tool waits for Thunderbird to confirm
 before returning, so a following search reflects the change.
+Moves allowed in the tbmcp config skip confirmation.
+The reply reports each message's source and any observed landing folder for undo.
 
 Parameters: **message_ids**, **destination_folder_id**, confirm, dry_run_only  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -103,12 +110,16 @@ Parameters: **message_ids**, **destination_folder_id**, confirm, dry_run_only
 
 Copy messages into another folder, leaving the originals in place.
 
+The reply reports each source and any observed copy location for undo.
+
 Parameters: **message_ids**, **destination_folder_id**, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_archive` · write
 
 Archive messages using each account's configured archive layout.
+
+The reply reports each source and any observed archive location for undo.
 
 Parameters: **message_ids**, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -191,8 +202,8 @@ Parameters: **folder_id**
 
 Get the unified folder that spans every account, e.g. all inboxes at once.
 
-Its id works anywhere a folder id is accepted, so `mail_list` on the unified
-inbox lists new mail across all accounts in one call.
+Its id works with `mail_list`. For one call that finds and lists all inboxes,
+use `mail_list(special_use="inbox")`.
 
 Parameters: **folder_type**, include_subfolders  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -201,12 +212,16 @@ Parameters: **folder_type**, include_subfolders
 
 Create a folder inside another folder, or at the top of an account.
 
+Folders allowed in the tbmcp config skip confirmation.
+
 Parameters: **name**, parent_id, account_id, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `folder_rename` · write
 
 Rename a folder, keeping its messages and subfolders.
+
+Folders allowed in the tbmcp config skip confirmation.
 
 Parameters: **folder_id**, **new_name**, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -236,6 +251,7 @@ Delete a folder, its subfolders and every message in them.
 Thunderbird moves the folder to Trash unless it is already inside Trash, in
 which case it goes for good. Check `folder_get` first if the count matters —
 the reply reports what was removed, but cannot put it back.
+Empty subfolders allowed in the tbmcp config skip confirmation.
 
 Parameters: **folder_id**, confirm, dry_run_only  
 *(bold means required; `confirm` is the confirmation gate)*
@@ -316,8 +332,10 @@ list entry. `attachments` are paths to files on this machine. A draft still
 asks for confirmation, because the identical call with `mode="send"` would
 deliver it. Set `reply_to_message_id` to thread the message under an existing
 one — but `mail_reply` is usually what you want, since it also quotes.
+`inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+an HTML body and set `is_html=true`.
 
-Parameters: **to**, **subject**, **body**, cc, bcc, is_html, attachments, identity_id, mode, reply_to_message_id, priority, return_receipt, delivery_format, custom_headers, confirm, dry_run_only  
+Parameters: **to**, **subject**, **body**, cc, bcc, is_html, attachments, inline_images, identity_id, mode, reply_to_message_id, priority, return_receipt, delivery_format, custom_headers, confirm, dry_run_only  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_reply` · **destructive**
@@ -328,8 +346,10 @@ Thunderbird derives the recipients, the subject and the quoted original;
 `body` goes above the quote. `reply_all` copies everyone, `reply_to_list`
 answers the mailing list. Passing `cc` replaces the addresses Thunderbird
 derived, so leave it unset unless that is the intent.
+`inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+an HTML body and set `is_html=true`.
 
-Parameters: **message_id**, **body**, reply_all, reply_to_list, quote_original, is_html, subject, cc, bcc, attachments, identity_id, mode, confirm  
+Parameters: **message_id**, **body**, reply_all, reply_to_list, quote_original, is_html, subject, cc, bcc, attachments, inline_images, identity_id, mode, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_forward` · **destructive**
@@ -339,8 +359,10 @@ Forward a message. Saves a reviewable draft unless `mode="send"`.
 `inline` quotes the original in the body; `attachment` attaches it as a
 `.eml`, which preserves the headers a recipient may need. `body` is your
 covering note and goes above the forwarded text.
+`inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+an HTML body and set `is_html=true`.
 
-Parameters: **message_id**, **to**, body, forward_as, cc, bcc, subject, is_html, attachments, identity_id, mode, confirm  
+Parameters: **message_id**, **to**, body, forward_as, cc, bcc, subject, is_html, attachments, inline_images, identity_id, mode, confirm  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_draft_save` · write
@@ -351,8 +373,10 @@ Nothing leaves the machine, so this is not gated — a draft is exactly the
 thing to produce when you want the user to review before anything is sent.
 A template is the reusable kind: Thunderbird keeps it in Templates and opens
 a copy when the user picks it. Recipients are optional here, unlike a send.
+`inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+an HTML body and set `is_html=true`.
 
-Parameters: subject, body, to, cc, bcc, kind, is_html, attachments, identity_id  
+Parameters: subject, body, to, cc, bcc, kind, is_html, attachments, inline_images, identity_id  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_compose_open` · write
@@ -363,8 +387,10 @@ The right answer whenever the wording matters more than the automation, or
 when the user declined a send: they get the draft in front of them with the
 cursor in it. Nothing is sent or saved, and the user sees the window appear,
 so this is not gated.
+`inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+an HTML body and set `is_html=true`.
 
-Parameters: to, subject, body, cc, bcc, is_html, attachments, identity_id, reply_to_message_id, forward_message_id, reply_all, quote_original  
+Parameters: to, subject, body, cc, bcc, is_html, attachments, inline_images, identity_id, reply_to_message_id, forward_message_id, reply_all, quote_original  
 *(bold means required; `confirm` is the confirmation gate)*
 
 ### `mail_send_status` · read
@@ -1172,8 +1198,10 @@ Connection status, events, diagnostics and the error console.
 
 Whether Thunderbird is attached, and which halves of the add-on loaded.
 
-Answered by the local daemon, so it works when Thunderbird is closed. Call it
-first whenever another tool reports that it cannot reach Thunderbird.
+Answered by the local daemon. Just after the daemon starts, if Thunderbird is
+running, wait up to about 20 seconds for its add-on to attach. If Thunderbird
+is closed, answer at once with `state: "not-running"`. The `state` field tells
+callers whether to ask the user to start Thunderbird or call `tb_wait`.
 
 Parameters: *none*
 

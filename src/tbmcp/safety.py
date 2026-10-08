@@ -19,6 +19,7 @@ anything else gets a `BlockedError` that tells the model exactly what to pass.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context, Elicit, Resolve
@@ -26,7 +27,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from .config import Settings
-from .errors import BlockedError
+from .errors import BlockedError, UsageError
 
 # Set once by server.build_server(); resolvers are module-level functions, so they
 # need a way to see the active policy.
@@ -49,7 +50,7 @@ class Consent(BaseModel):
         default=False,
         description="Approve this action. Answer no to abort without any change.",
     )
-    note: str | None = Field(default=None, description="Optional note recorded in the server log.")
+    note: str | None = Field(default=None, description="Optional note recorded in the action log.")
 
 
 #: Marks "there was no way to ask" as distinct from "the user said no". The
@@ -68,7 +69,26 @@ def _elicitation_available(ctx: Context | None) -> bool:
     return bool(capabilities and getattr(capabilities, "elicitation", None))
 
 
-def consent_for(action: str) -> Callable[..., Any]:
+@dataclass(frozen=True)
+class FolderPolicy:
+    """A folder rule action that can grant a gated folder tool without a prompt."""
+
+    action: str
+    """Rule action to look for, e.g. `"rename_subfolders"`."""
+    on_parent: bool = False
+    """The tool names its folder by `parent_id` rather than `folder_id`."""
+    strictly_below: bool = False
+    """The rule's own root folder is never granted, only folders beneath it."""
+    need_empty: bool = False
+    """The folder must hold no messages and no subfolders."""
+
+
+def consent_for(
+    action: str,
+    *,
+    folder_policy: FolderPolicy | None = None,
+    move_policy: bool = False,
+) -> Callable[..., Any]:
     """Build a resolver that gates a tool behind approval.
 
     `action` is a short imperative phrase used in the prompt, e.g.
@@ -79,14 +99,81 @@ def consent_for(action: str) -> Callable[..., Any]:
     would also block a `dry_run_only` preview — which is exactly when a caller most
     wants to look before committing. Instead it reports "no channel", and `require()`
     turns that into an error at the point the tool is about to actually do something.
+
+    `folder_policy` approves without asking when a configured folder rule grants
+    that action on the live folder. `move_policy` does the same for a message move:
+    into a `move_in` folder, or every message out of `move_out` folders.
     """
 
-    async def resolver(confirm: bool = False, ctx: Context | None = None):  # type: ignore[no-untyped-def]
+    async def decide(
+        confirm: bool,
+        ctx: Context | None,
+        folder_id: str | None = None,
+        message_ids: list[int] | None = None,
+        destination_folder_id: str | None = None,
+    ):  # type: ignore[no-untyped-def]
         if _settings.yolo or confirm:
             return Consent(approve=True)
+        if folder_policy is not None:
+            from .tools._common import policy_allows
+
+            if await policy_allows(
+                folder_policy.action,
+                folder_id,
+                strictly_below=folder_policy.strictly_below,
+                need_empty=folder_policy.need_empty,
+            ):
+                return Consent(approve=True)
+        if move_policy:
+            from .tools._common import policy_allows_mail_move, require_ids
+
+            try:
+                ids = require_ids(message_ids)
+            except (TypeError, ValueError, UsageError):
+                ids = []
+            if (
+                ids
+                and destination_folder_id
+                and await policy_allows_mail_move(ids, destination_folder_id)
+            ):
+                return Consent(approve=True)
         if _elicitation_available(ctx):
             return Elicit(f"Allow thunderbird-mcp to {action}?", Consent)
         return Consent(approve=False, note=NO_CHANNEL)
+
+    if move_policy:
+
+        async def resolver_move(
+            message_ids: list[int],
+            destination_folder_id: str,
+            confirm: bool = False,
+            ctx: Context | None = None,
+        ):  # type: ignore[no-untyped-def]
+            return await decide(
+                confirm, ctx, message_ids=message_ids, destination_folder_id=destination_folder_id
+            )
+
+        return resolver_move
+
+    if folder_policy is not None:
+        if folder_policy.on_parent:
+
+            async def resolver_parent(
+                parent_id: str | None = None, confirm: bool = False, ctx: Context | None = None
+            ):  # type: ignore[no-untyped-def]
+                return await decide(confirm, ctx, parent_id)
+
+            return resolver_parent
+
+        async def resolver_folder(
+            folder_id: str, confirm: bool = False, ctx: Context | None = None
+        ):  # type: ignore[no-untyped-def]
+            return await decide(confirm, ctx, folder_id)
+
+        return resolver_folder
+
+    async def resolver(confirm: bool = False, ctx: Context | None = None):  # type: ignore[no-untyped-def]
+        return await decide(confirm, ctx)
 
     return resolver
 
@@ -112,9 +199,16 @@ def require(consent: Consent | None, action: str) -> None:
     )
 
 
-def Gate(action: str) -> Any:
+def Gate(
+    action: str,
+    *,
+    folder_policy: FolderPolicy | None = None,
+    move_policy: bool = False,
+) -> Any:
     """`consent: Gate("delete these messages")` in a tool signature."""
-    return Annotated[Consent, Resolve(consent_for(action))]
+    return Annotated[
+        Consent, Resolve(consent_for(action, folder_policy=folder_policy, move_policy=move_policy))
+    ]
 
 
 def guard_write(what: str) -> None:

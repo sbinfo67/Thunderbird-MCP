@@ -20,16 +20,16 @@ settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
 | Tool | Bridge method | Notes |
 | --- | --- | --- |
 | `mail_search` | `messages.query` | `full_text` uses the global index; paginated |
-| `mail_list` | `messages.list` | one folder, sorted |
+| `mail_list` | `messages.list` | one folder or every folder of a type, sorted |
 | `mail_get` | `messages.read` | `detail=summary\|text\|full` |
 | `mail_get_many` | `messages.readMany` | ≤50 ids, progress-reporting |
 | `mail_get_source` | `messages.raw` | needs offline copy on IMAP |
 | `mail_attachments` | `messages.listAttachments` | |
 | `mail_save_attachment` | `messages.saveAttachment` → `x.files.write` | writes to disk; gated, interactive |
-| `mail_mark` | `messages.mark` | read/flagged/junk/tags; no confirmation |
-| `mail_move` | `messages.move` | gated; reports source folders |
-| `mail_copy` | `messages.copy` | gated |
-| `mail_archive` | `messages.archive` | gated |
+| `mail_mark` | `messages.mark` | read/flagged/junk/tags; no confirmation; reports earlier state per message |
+| `mail_move` | `messages.move` | gated; folder config rules can skip confirmation; reports each source and observed landing |
+| `mail_copy` | `messages.copy` | gated; reports each source and observed copy location |
+| `mail_archive` | `messages.archive` | gated; reports each source and observed archive location |
 | `mail_delete` | `messages.delete` | gated, `DESTRUCTIVE`, `permanent` flag |
 | `mail_tags` | `tags.list` | |
 | `mail_tag_upsert` | `tags.upsert` | |
@@ -42,11 +42,11 @@ settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
 | `folder_list` | `folders.query` — tree or flat, with counts |
 | `folder_get` | `folders.get` — one folder plus `MailFolderInfo` |
 | `folder_capabilities` | `folders.capabilities` — can it hold messages, be renamed… |
-| `folder_create` | `folders.create` (gated) |
-| `folder_rename` | `folders.rename` (gated) |
+| `folder_create` | `folders.create` (gated; folder config rules can skip confirmation) |
+| `folder_rename` | `folders.rename` (gated; folder config rules can skip confirmation) |
 | `folder_move` | `folders.move` (gated) |
 | `folder_copy` | `folders.copy` (gated) |
-| `folder_delete` | `folders.delete` (gated, destructive) |
+| `folder_delete` | `folders.delete` (gated, destructive; folder config rules can skip confirmation for empty subfolders) |
 | `folder_mark_read` | `folders.markAsRead` (gated) |
 | `folder_set_favorite` | `folders.update` |
 | `folder_empty_trash` | `folders.emptyTrash` (gated, destructive) |
@@ -66,9 +66,20 @@ settings 11, admin 7. `tbmcp tools --toolsets all` prints the live list.
 | `mail_compose_open` | `compose.open` | opens a window for the user to finish |
 | `mail_send_status` | `compose.status` | outbox / send-later queue |
 
-`compose.send` uses `messages.sendMessage`, which sends without opening a compose
-window, and falls back to `compose.beginNew` + `sendMessage(tabId)` when that is
-unavailable. HTML bodies are supported; pass `is_html`.
+The five writing tools accept `inline_images`: a map from reference name to an
+absolute image path. In an HTML body, put `<img src="cid:logo">` where the picture
+belongs and pass `inline_images={"logo": "C:\\images\\logo.png"}` with
+`is_html=true`. Each name must be referenced. Only image files are accepted, up to
+25 MB each; reading paths needs the privileged half of the add-on. Thunderbird
+assigns the final `Content-ID`, which may differ from the reference name. A reply
+with inline images opens in HTML mode. Inline images may not survive editing in
+Thunderbird for Android.
+
+New messages without inline images use `messages.sendMessage` or
+`messages.saveMessage` headlessly when available. Replies, forwards, image bodies,
+and builds without the headless capability open a compose window briefly. The
+window lets Thunderbird store inline images as MIME parts for both drafts and sent
+mail. A raw `<img src="data:…">` body also uses the window route.
 
 `messages.sendMessage` needs the `messages.send` permission, which Thunderbird
 declares `OptionalOnlyPermission` — unrequestable from the manifest, grantable only
@@ -169,13 +180,16 @@ denylist, because that is the only layer with real privilege.
 | `tb_addons` | `x.admin.addons` | installed add-ons |
 | `tb_restart` | `x.admin.restart` | gated, interactive |
 
-`tb_status`, `tb_wait` and `tb_events` are daemon-local: they answer even when
-Thunderbird is closed, which is what makes a clear error possible instead of a hang.
+`tb_status`, `tb_wait` and `tb_events` are daemon-local. `tb_status` distinguishes
+`not-running` from `not-attached`: when Thunderbird is running and the daemon just
+started, it waits briefly for the add-on to attach. Otherwise it answers immediately,
+including when Thunderbird is closed. `tb_wait` explicitly blocks until attachment.
 
 ## Conventions every tool follows
 
 - Return a dict. `_common.page()` for lists, `_common.changed()` for writes,
   `_common.dry_run()` when `dry_run_only=True`.
+- Every write tool call is appended to the action log in the state directory.
 - Mutating tools: `confirm: bool = False`, `consent: Gate("…") = None`,
   `guard_write("…")` first, `require(consent, "…")` before the write.
 - `Gate(...)` params never appear in the input schema, so the model cannot forge

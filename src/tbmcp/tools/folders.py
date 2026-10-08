@@ -12,10 +12,12 @@ first. Its output is deliberately terse for that reason.
 from typing import Any, Literal
 
 from ..errors import UsageError
+from ..policy import grants
 from ..safety import (
     DESTRUCTIVE,
     IDEMPOTENT_WRITE,
     MUTATING,
+    FolderPolicy,
     Gate,
     guard_write,
     require,
@@ -150,8 +152,8 @@ def register(reg: Registrar) -> None:
     ) -> dict[str, Any]:
         """Get the unified folder that spans every account, e.g. all inboxes at once.
 
-        Its id works anywhere a folder id is accepted, so `mail_list` on the unified
-        inbox lists new mail across all accounts in one call.
+        Its id works with `mail_list`. For one call that finds and lists all inboxes,
+        use `mail_list(special_use="inbox")`.
         """
         result = await call(
             "folders.getUnified",
@@ -162,15 +164,24 @@ def register(reg: Registrar) -> None:
 
     # ------------------------------------------------------------------- reshaping
 
-    @reg.write_tool(title="Create a folder", annotations=MUTATING)
+    @reg.write_tool(
+        title="Create a folder",
+        annotations=MUTATING,
+        interactive=not grants(reg.settings.folder_rules, "create_subfolders"),
+    )
     async def folder_create(
         name: str,
         parent_id: str | None = None,
         account_id: str | None = None,
         confirm: bool = False,
-        consent: Gate("create a folder") = None,  # type: ignore[valid-type]
+        consent: Gate(
+            "create a folder", folder_policy=FolderPolicy("create_subfolders", on_parent=True)
+        ) = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
-        """Create a folder inside another folder, or at the top of an account."""
+        """Create a folder inside another folder, or at the top of an account.
+
+        Folders allowed in the tbmcp config skip confirmation.
+        """
         guard_write("create folders")
         if not parent_id and not account_id:
             raise UsageError(
@@ -185,14 +196,23 @@ def register(reg: Registrar) -> None:
         )
         return changed("folders.create", before=None, after=_slim(result.get("folder") or {}))
 
-    @reg.write_tool(title="Rename a folder", annotations=MUTATING)
+    @reg.write_tool(
+        title="Rename a folder",
+        annotations=MUTATING,
+        interactive=not grants(reg.settings.folder_rules, "rename_subfolders"),
+    )
     async def folder_rename(
         folder_id: str,
         new_name: str,
         confirm: bool = False,
-        consent: Gate("rename a folder") = None,  # type: ignore[valid-type]
+        consent: Gate(
+            "rename a folder", folder_policy=FolderPolicy("rename_subfolders", strictly_below=True)
+        ) = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
-        """Rename a folder, keeping its messages and subfolders."""
+        """Rename a folder, keeping its messages and subfolders.
+
+        Folders allowed in the tbmcp config skip confirmation.
+        """
         guard_write("rename folders")
         require(consent, "rename this folder")
         result = await call(
@@ -256,11 +276,18 @@ def register(reg: Registrar) -> None:
             "folder": _slim(result.get("folder") or {}),
         }
 
-    @reg.write_tool(title="Delete a folder", annotations=DESTRUCTIVE)
+    @reg.write_tool(
+        title="Delete a folder",
+        annotations=DESTRUCTIVE,
+        interactive=not grants(reg.settings.folder_rules, "delete_subfolders"),
+    )
     async def folder_delete(
         folder_id: str,
         confirm: bool = False,
-        consent: Gate("delete a folder and everything in it") = None,  # type: ignore[valid-type]
+        consent: Gate(
+            "delete a folder and everything in it",
+            folder_policy=FolderPolicy("delete_subfolders", strictly_below=True, need_empty=True),
+        ) = None,  # type: ignore[valid-type]
         dry_run_only: bool = False,
     ) -> dict[str, Any]:
         """Delete a folder, its subfolders and every message in them.
@@ -268,6 +295,7 @@ def register(reg: Registrar) -> None:
         Thunderbird moves the folder to Trash unless it is already inside Trash, in
         which case it goes for good. Check `folder_get` first if the count matters —
         the reply reports what was removed, but cannot put it back.
+        Empty subfolders allowed in the tbmcp config skip confirmation.
         """
         guard_write("delete folders")
         if dry_run_only:

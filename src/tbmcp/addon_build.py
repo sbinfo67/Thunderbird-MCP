@@ -107,16 +107,43 @@ def addon_id(src: pathlib.Path | None = None) -> str:
     return str(gecko.get("id") or "bridge@thunderbird-mcp")
 
 
+def _digest(entries) -> str:
+    digest = hashlib.sha256()
+    for arcname, data in entries:
+        digest.update(arcname.encode("utf-8"))
+        digest.update(data)
+    return digest.hexdigest()[:12]
+
+
+def source_digest(src: pathlib.Path | None = None) -> str:
+    return _digest(_entries(src or addon_source_dir()))
+
+
+def xpi_digest(path: pathlib.Path) -> str | None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return _digest((name, zf.read(name)) for name in zf.namelist())
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return None
+
+
+def build_check(profile_path: pathlib.Path) -> dict:
+    """Compare source with Gecko's unchanged installed XPI, written in digest order."""
+    installed = xpi_digest(profile_path / "extensions" / f"{addon_id()}.xpi")
+    source = source_digest()
+    return {
+        "installed": installed,
+        "source": source,
+        "stale": bool(installed and installed != source),
+    }
+
+
 def build_xpi(dest_dir: pathlib.Path, *, src: pathlib.Path | None = None) -> pathlib.Path:
     """Write `<dest_dir>/tbmcp-bridge-<version>-<hash>.xpi` and return its path."""
     src = src or addon_source_dir()
     entries = _entries(src)
 
-    digest = hashlib.sha256()
-    for arcname, data in entries:
-        digest.update(arcname.encode("utf-8"))
-        digest.update(data)
-    short = digest.hexdigest()[:12]
+    short = _digest(entries)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"tbmcp-bridge-{addon_version(src)}-{short}.xpi"

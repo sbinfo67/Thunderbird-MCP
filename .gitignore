@@ -19,5 +19,20 @@ probe/explore.json
 probe/*.log
 *.local.json
 
+# Local folder rules; copy settings.example.json
+/settings.json
+
 # Per-plan review artifacts (subagent-driven development)
 .superpowers/
+
+# Claude Code local state and root plan files
+.claude/
+/PLAN_*.md
+PLAN.md
+HANDOFF.md
+tmp/commit_msg.tmp
+claude-plans
+tickets/
+graphify-out/
+code_analysis_results/
+.reasonix/

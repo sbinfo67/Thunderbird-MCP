@@ -154,3 +154,37 @@ def test_the_failure_text_does_not_claim_a_restart_that_no_restart_prevented(flo
     assert "is being restarted" not in text
     # The restart hook is still invoked — it is the hook that honours the flag.
     assert calls["restart"] == 1
+
+
+def test_refusal_names_each_remaining_window_without_launching(flow, monkeypatch):
+    calls = flow(FakeClient(None))
+    monkeypatch.setattr(addon_install.sys, "platform", "win32")
+    monkeypatch.setattr(addon_install, "_stop", lambda timeout=60.0: False)
+    monkeypatch.setattr(addon_install, "open_windows", lambda: [(1, "Inbox"), (2, "Write: Draft")])
+    with pytest.raises(TbmcpError) as caught:
+        addon_install.install_automatic()
+    assert caught.value.code == "WONT_CLOSE"
+    assert '"Inbox"' in str(caught.value)
+    assert '"Write: Draft"' in str(caught.value)
+    assert calls["launch"] == []
+
+
+def test_refusal_without_visible_windows_explains_running_process(flow, monkeypatch):
+    flow(FakeClient(None))
+    monkeypatch.setattr(addon_install.sys, "platform", "win32")
+    monkeypatch.setattr(addon_install, "_stop", lambda timeout=60.0: False)
+    monkeypatch.setattr(addon_install, "open_windows", lambda: [])
+    with pytest.raises(TbmcpError) as caught:
+        addon_install.install_automatic()
+    assert "no visible windows remain but the process is still running" in str(caught.value)
+
+
+def test_closed_thunderbird_starts_without_stop(flow, monkeypatch):
+    calls = flow(
+        FakeClient({"result": {"ok": True, "version": EXPECTED_VERSION, "isActive": True}})
+    )
+    monkeypatch.setattr(addon_install, "is_running", lambda: False)
+    outcome = addon_install.install_automatic()
+    assert outcome.ok
+    assert calls["stop"] == 1  # cleanup after the automation session, never before launch
+    assert calls["launch"] == [["-marionette", "-remote-allow-system-access"]]

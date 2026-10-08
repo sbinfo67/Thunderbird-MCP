@@ -153,7 +153,7 @@ describe("fakeMessages", () => {
   it("pages a folder and leaves the id off the last page", async () => {
     const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, pageSize: 10 });
 
-    const first = await messages.list(FOLDER, { sortType: "date", sortOrder: "descending" });
+    const first = await messages.list(FOLDER);
     assert.equal(first.messages.length, 10);
     assert.ok(first.id, "more pages remain, so the list stays open");
 
@@ -182,7 +182,7 @@ describe("fakeMessages", () => {
   it("forgets an aborted list and records every call", async () => {
     const messages = fakeMessages({ folders: { [FOLDER]: sample(12) }, pageSize: 10 });
 
-    const first = await messages.list(FOLDER, {});
+    const first = await messages.list(FOLDER);
     await messages.abortList(first.id);
 
     await assert.rejects(messages.continueList(first.id), /Unknown or expired list/);

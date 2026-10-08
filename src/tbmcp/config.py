@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Literal
+
+from .policy import FolderRule, default_config_path, load_rules
 
 SendMode = Literal["draft", "send"]
 
@@ -109,6 +112,9 @@ class Settings:
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
     """Individual tools to add on top of the selected toolsets."""
 
+    folder_rules: tuple[FolderRule, ...] = ()
+    """Folder actions allowed without confirmation by the user's config file."""
+
     # ------------------------------------------------------------------ parsing
 
     @staticmethod
@@ -119,7 +125,7 @@ class Settings:
         return raw.strip().lower() in ("1", "true", "yes", "on")
 
     @classmethod
-    def from_env(cls) -> Settings:
+    def from_env(cls, config_path: Path | None = None) -> Settings:
         return cls(
             toolsets=parse_toolsets(os.environ.get("TBMCP_TOOLSETS")),
             read_only=cls._flag("TBMCP_READ_ONLY", False),
@@ -131,6 +137,9 @@ class Settings:
             autostart_daemon=not cls._flag("TBMCP_NO_AUTOSTART", False),
             extra_tools=tuple(
                 t.strip() for t in (os.environ.get("TBMCP_TOOLS") or "").split(",") if t.strip()
+            ),
+            folder_rules=load_rules(
+                config_path if config_path is not None else default_config_path()
             ),
         )
 

@@ -13,7 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import safety
+from . import action_log, safety
 from .bridge import Bridge, set_shared_bridge
 from .config import ALL_TOOLSETS, Settings
 from .errors import TbmcpError
@@ -93,7 +93,7 @@ class Registrar:
             self.skipped.append(fn.__name__)
             return fn
         self.mcp.add_tool(
-            _as_tool_error(fn),
+            _as_tool_error(action_log.recorded(fn) if mutates else fn),
             title=title,
             # Normalise the docstring ourselves rather than letting the interpreter
             # decide: CPython 3.13 strips common leading whitespace from `__doc__` at
@@ -199,4 +199,4 @@ def _version() -> str:
 
         return version("thunderbird-mcp")
     except Exception:
-        return "1.3.0"
+        return "1.3.1"

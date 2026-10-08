@@ -23,6 +23,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -31,7 +32,14 @@ from websockets.exceptions import ConnectionClosed
 from . import ipc
 from .errors import NotConnectedError, TimeoutError_, TransportError, from_wire
 from .handshake import HandshakeLog, describe_handshake
-from .profile import BRIDGE_FILE, ThunderbirdProfile, find_profile
+from .profile import (
+    BRIDGE_FILE,
+    SOURCE_LABELS,
+    ThunderbirdProfile,
+    find_profile,
+    running_profile_dirs,
+    same_path,
+)
 
 log = logging.getLogger("tbmcp.daemon")
 
@@ -41,6 +49,7 @@ DEFAULT_IDLE_TIMEOUT = 900.0
 HELLO_TIMEOUT = 10.0
 """How long a connected add-on has to send its `hello`. A module constant so the
 handshake tests can shorten it without waiting out a real ten seconds."""
+FOLLOW_INTERVAL = 5.0
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -247,6 +256,10 @@ class Daemon:
         self._inflight: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._session_ready = asyncio.Event()
+        self.thunderbird_profiles: list[Path] = []
+        self._followed_at = 0.0
+        self._addon_port: int | None = None
+        self._control_port: int | None = None
 
     # ------------------------------------------------------------------ add-on side
 
@@ -495,6 +508,7 @@ class Daemon:
     ) -> Any:
         """Daemon-local methods first, then anything the add-on handles."""
         if method == "daemon.status":
+            await self._follow_thunderbird()
             return self.status()
         if method == "daemon.events":
             since = int(params.get("since") or 0)
@@ -503,10 +517,26 @@ class Daemon:
             return {"events": selected, "latestSeq": self.event_seq}
         if method == "daemon.waitForThunderbird":
             wait = float(params.get("timeout") or 30.0)
-            try:
-                await asyncio.wait_for(self._session_ready.wait(), timeout=wait)
-            except TimeoutError:
-                raise self._not_connected() from None
+            deadline = time.monotonic() + wait
+            while not self._session_ready.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self._not_connected()
+                # The profile lookup can outlast the wait, so attachment and the
+                # deadline both end it; a cancelled follow never publishes a move.
+                racers = [
+                    asyncio.ensure_future(self._session_ready.wait()),
+                    asyncio.ensure_future(self._follow_then_pause()),
+                ]
+                try:
+                    done, _ = await asyncio.wait(
+                        racers, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done:
+                        task.result()
+                finally:
+                    for task in racers:
+                        task.cancel()
             return self.status()
         if method == "daemon.shutdown":
             self._stop.set()
@@ -534,7 +564,12 @@ class Daemon:
                 "eventsBuffered": len(self.events),
                 "latestEventSeq": self.event_seq,
             },
-            "profile": {"path": str(self.profile.path), "name": self.profile.name},
+            "profile": {
+                "path": str(self.profile.path),
+                "name": self.profile.name,
+                "source": self.profile.source,
+                "thunderbirdProfiles": [str(p) for p in self.thunderbird_profiles],
+            },
             "thunderbird": self.session.describe() if self.session else None,
             "connected": self.session is not None,
             "handshake": self.handshakes.summary(),
@@ -557,7 +592,59 @@ class Daemon:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(tmp, path)
         ipc._restrict_permissions(path)
+        self._addon_port = port
         log.info("pairing file written to %s (port %d)", path, port)
+
+    def _remove_bridge_file(self, path: Path | None = None) -> None:
+        path = path or self.profile.path / BRIDGE_FILE
+        if _bridge_file_pid(path) == os.getpid():
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    def _advertise(self) -> None:
+        if self._control_port is None:
+            return
+        ipc.DaemonInfo(
+            version=ipc.PROTOCOL_VERSION,
+            port=self._control_port,
+            token=self.control_token,
+            pid=os.getpid(),
+            profile=str(self.profile.path),
+        ).write()
+
+    async def _follow_thunderbird(self) -> None:
+        """Move an auto-picked pairing file to the running Thunderbird profile."""
+        if self.session is not None or time.monotonic() - self._followed_at < FOLLOW_INTERVAL:
+            return
+        self._followed_at = time.monotonic()
+        self.thunderbird_profiles = await asyncio.to_thread(running_profile_dirs)
+        # An add-on can attach while the lookup runs; its profile then stays put.
+        if (
+            self.session is not None
+            or self.profile.source == "explicit"
+            or not self.thunderbird_profiles
+            or any(same_path(self.profile.path, p) for p in self.thunderbird_profiles)
+            or self._addon_port is None
+        ):
+            return
+        old = self.profile
+        path = self.thunderbird_profiles[0]
+        log.warning("moving pairing file from %s to running profile %s", old.path, path)
+        self.profile = ThunderbirdProfile(path, path.name, False, path.parent.parent, "running")
+        try:
+            self._write_bridge_file(self._addon_port)
+            self._advertise()
+        except OSError:
+            self._remove_bridge_file()
+            self.profile = old
+            log.exception("could not publish pairing file for %s", path)
+            return
+        self._remove_bridge_file(old.bridge_file)
+
+    async def _follow_then_pause(self) -> None:
+        """One follow attempt and the pause before the next, for `waitForThunderbird`."""
+        await self._follow_thunderbird()
+        await asyncio.sleep(FOLLOW_INTERVAL)
 
     def _cleanup(self) -> None:
         """Remove what we published — and only what is still ours.
@@ -566,10 +653,7 @@ class Daemon:
         deleted the *winner's* pairing file and advertisement, which left the add-on
         holding a token nothing was listening for and `serve` with nothing to find.
         """
-        path = self.profile.path / BRIDGE_FILE
-        if _bridge_file_pid(path) == os.getpid():
-            with contextlib.suppress(OSError):
-                path.unlink()
+        self._remove_bridge_file()
         ipc.DaemonInfo.clear_if_owned(os.getpid())
 
     async def _watch_idle(self) -> None:
@@ -614,14 +698,9 @@ class Daemon:
         ):
             control_port = control.sockets[0].getsockname()[1]
             addon_port = addon_server.sockets[0].getsockname()[1]
+            self._control_port = control_port
             self._write_bridge_file(addon_port)
-            ipc.DaemonInfo(
-                version=ipc.PROTOCOL_VERSION,
-                port=control_port,
-                token=self.control_token,
-                pid=os.getpid(),
-                profile=str(self.profile.path),
-            ).write()
+            self._advertise()
             # Published: the startup race is over, so stop blocking other starts.
             if self.startup_lock is not None:
                 self.startup_lock.release()
@@ -687,6 +766,8 @@ async def run_daemon(
         if lock is not None:
             lock.release()
         return 2
+
+    log.info("selected profile %s (%s)", profile.path, SOURCE_LABELS[profile.source])
 
     daemon = Daemon(profile, idle_timeout=idle_timeout, startup_lock=lock)
     try:

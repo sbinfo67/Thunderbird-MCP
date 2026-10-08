@@ -20,6 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from tbmcp import marionette
 from tbmcp.addon_build import addon_id
 from tbmcp.addon_install import _launch, _stop, find_thunderbird
+from tbmcp.profile import find_profile
 
 SCRIPT = r"""
 const pattern = arguments[0];
@@ -67,8 +68,9 @@ def main() -> int:
         print("could not find thunderbird")
         return 2
 
+    profile = find_profile()
     _stop()
-    _launch(exe, ["-marionette", "-remote-allow-system-access"], None)
+    _launch(exe, ["-marionette", "-remote-allow-system-access"], profile)
     if not marionette.wait_for_port(timeout=90.0):
         print("marionette never opened")
         return 1
@@ -84,7 +86,7 @@ def main() -> int:
 
     print(json.dumps(report, indent=2, ensure_ascii=False))
     _stop(timeout=30.0)
-    _launch(exe, [], None)
+    _launch(exe, [], profile)
     print("\n(Thunderbird restarted without automation)")
     return 0
 

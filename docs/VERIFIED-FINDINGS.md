@@ -6,6 +6,34 @@ Reproduce with `probe/` (see [`probe/README.md`](../probe/README.md)).
 Environment: Thunderbird `153.0`, buildID `20260717002111`, channel `release`,
 `MOZ_BUILD_APP=comm/mail`, Windows 11 Pro 26200, Python 3.14.
 
+## Empty body on the headless path (Thunderbird 153.4.0 source)
+
+Read from the portable build's `omni.ja` source, not measured with a live save
+or send. `ext-messages.js::doMsgOperation` assigns
+`msgCompose.compFields.body = details.plainTextBody || details.body` for plain
+text. With no compose editor, `MessageSend.sys.mjs::createAndSendMessage` uses
+`let bodyText = this._getBodyFromEditor(editor) || body` and then
+`new TextEncoder().encode(bodyText)`. A missing body, or an explicit empty plain
+text body, can therefore encode the word `null`. Missing HTML also takes that
+plain-text path; an explicit empty HTML body uses `details.body` directly.
+The add-on now supplies both empty body fields for headless plain text, or an
+empty HTML body with `isPlainText: false`.
+
+## Inline images in Thunderbird 153.3.1 source
+
+These findings come from reading the portable build's `omni.ja` source, not from
+a live send measurement:
+
+- `MessageSend.sys.mjs::_gatherEmbeddedAttachments(editor)` converts `data:`
+  images into `multipart/related` parts with `Content-ID` and `cid:` body links.
+  With no editor, it gathers none.
+- `messages.saveMessage` and `messages.sendMessage` call `msgCompose.sendMsg`
+  without a compose window or editor; the `compose` tab variants have an editor.
+- `MimeMessageUtils.sys.mjs::pickFileNameFromUrl` reads a URL-encoded file name
+  from `;filename=…;` in a data URL.
+- `ext-compose.js::openComposeWindow` accepts `isPlainText: false` when opening a
+  reply or forward, before `setComposeDetails` can edit its body.
+
 ## Build constants (from `omni.ja` → `modules/AppConstants.sys.mjs`)
 
 ```

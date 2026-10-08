@@ -12,6 +12,7 @@ Two of these guard against traps that cost real debugging time against Thunderbi
 from __future__ import annotations
 
 import pathlib
+import shutil
 import zipfile
 
 import pytest
@@ -22,7 +23,10 @@ from tbmcp.addon_build import (
     addon_source_dir,
     addon_version,
     assemble_implementation,
+    build_check,
     build_xpi,
+    source_digest,
+    xpi_digest,
 )
 
 
@@ -93,6 +97,27 @@ def test_build_is_reproducible(tmp_path) -> None:
     second = build_xpi(tmp_path / "b")
     assert first.name == second.name, "content hash differs between identical builds"
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_build_digest_detects_changed_source_and_installed_xpi(tmp_path) -> None:
+    original = build_xpi(tmp_path / "original")
+    assert xpi_digest(original) == source_digest() == original.stem.rsplit("-", 1)[-1]
+    source = tmp_path / "source"
+    shutil.copytree(addon_source_dir(), source)
+    handler = source / "background" / "handlers" / "messages.js"
+    handler.write_bytes(handler.read_bytes() + b"\n// changed\n")
+    assert source_digest(source) != xpi_digest(original)
+    extensions = tmp_path / "profile" / "extensions"
+    extensions.mkdir(parents=True)
+    installed = extensions / f"{addon_id()}.xpi"
+    shutil.copyfile(build_xpi(tmp_path / "changed", src=source), installed)
+    assert build_check(tmp_path / "profile")["stale"] is True
+    shutil.copyfile(original, installed)
+    assert build_check(tmp_path / "profile")["stale"] is False
+    installed.write_bytes(b"not a zip")
+    assert build_check(tmp_path / "profile")["installed"] is None
+    installed.unlink()
+    assert build_check(tmp_path / "profile")["stale"] is False
 
 
 def test_rebuilding_the_same_content_is_a_no_op(tmp_path) -> None:

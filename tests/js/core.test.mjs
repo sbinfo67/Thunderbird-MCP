@@ -136,6 +136,28 @@ describe("invoke", () => {
 });
 
 describe("the rest of the API surface", () => {
+  it("writes decoded attachment bytes without atob in the sandbox", async () => {
+    const globals = fakeSandbox();
+    const input = Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0x10, 0x80, 0xfe]);
+    const base64 = Buffer.from(input).toString("base64");
+    assert.match(base64, /[+/]/);
+    globals.IOUtils.exists = async (path) => path === "/out";
+    let written;
+    globals.IOUtils.write = async (path, bytes) => {
+      written = { path, bytes };
+    };
+    const { api } = experiment(globals);
+
+    const result = await api.writeFile({
+      directory: "/out", filename: "photo.jpg", base64, overwrite: false,
+    });
+
+    assert.equal(written.path, "/out/photo.jpg");
+    assert.deepEqual(Array.from(written.bytes), Array.from(input));
+    assert.equal(result.bytes, input.length);
+    assert.equal(result.path, "/out/photo.jpg");
+  });
+
   it("packs a blocked write into the envelope, though it never goes through invoke", async () => {
     const globals = fakeSandbox();
     globals.IOUtils = { ...globals.IOUtils, exists: async () => true };

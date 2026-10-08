@@ -18,6 +18,7 @@ import sys
 import textwrap
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from .config import ALL_TOOLSETS, Settings, parse_toolsets
 from .handshake import describe_handshake
@@ -63,7 +64,8 @@ def _attach_log_file(path) -> None:
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
-    settings = Settings.from_env()
+    config = getattr(args, "config", None)
+    settings = Settings.from_env(Path(config) if config is not None else None)
     toolsets = parse_toolsets(args.toolsets) if getattr(args, "toolsets", None) else None
     return settings.merged_with(
         toolsets=toolsets,
@@ -130,9 +132,67 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
     outcome = addon_install.install_automatic(profile, restart_after=not args.no_restart)
     print(outcome.message)
     if not outcome.ok:
-        _package, text = addon_install.manual_instructions(outcome.xpi)
-        print("\nAutomatic install did not work. Do it by hand:\n", file=sys.stderr)
-        print(text, file=sys.stderr)
+        _print_manual_install_fallback(addon_install, outcome)
+        return 1
+    return 0
+
+
+def _print_manual_install_fallback(addon_install, outcome) -> None:
+    _package, text = addon_install.manual_instructions(outcome.xpi)
+    print("\nAutomatic install did not work. Do it by hand:\n", file=sys.stderr)
+    print(text, file=sys.stderr)
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    """Stop stale Python code and update the add-on only when its build changed."""
+    from . import addon_build, addon_install, ipc
+    from .bridge import Bridge
+    from .errors import TransportError
+    from .profile import find_profile
+
+    bridge = Bridge(profile_hint=args.profile, autostart=False)
+
+    async def refresh_daemon() -> None:
+        try:
+            status = await bridge.status()
+        except TransportError as exc:
+            # Anything else (a rejected token, an unreadable frame) is a daemon that
+            # may well be running stale code, not an absent one.
+            if exc.code != "NO_DAEMON":
+                raise
+            print("no daemon running")
+            return
+        uptime = (status.get("daemon") or {}).get("uptimeSeconds", 0)
+        if ipc.newest_source_mtime() > time.time() - uptime:
+            try:
+                await bridge.call("daemon.shutdown")
+            except TransportError as exc:
+                # The daemon hanging up before it answers is the shutdown working.
+                # `Bridge.call` reconnects once after such a drop, and with autostart
+                # off that retry reports `NO_DAEMON` — the same outcome. Any other
+                # code does not establish that it stopped.
+                if exc.code not in ("DISCONNECTED", "NO_DAEMON"):
+                    raise
+            print("daemon code is stale; the next call starts a fresh one")
+        else:
+            print("daemon is current")
+
+    try:
+        asyncio.run(refresh_daemon())
+    finally:
+        asyncio.run(bridge.close())
+
+    profile = find_profile(args.profile)
+    if profile is not None:
+        build = addon_build.build_check(profile.path)
+        if build["installed"] == build["source"]:
+            print(f"add-on build `{build['source']}` is current, Thunderbird left alone")
+            return 0
+
+    outcome = addon_install.install_automatic(profile, restart_after=addon_install.is_running())
+    print(outcome.message)
+    if not outcome.ok:
+        _print_manual_install_fallback(addon_install, outcome)
         return 1
     return 0
 
@@ -174,16 +234,19 @@ def _addon_version_check(report: dict) -> dict:
     live = ((report.get("bridge") or {}).get("thunderbird") or {}).get("addonVersion")
     source = (report.get("addon") or {}).get("addonVersion")
     running = live or installed
+    build = report.get("addonBuild") or {}
     return {
         "installed": installed,
         "live": live,
         "source": source,
-        "mismatch": bool(source and running and running != source),
+        "installedBuild": build.get("installed"),
+        "sourceBuild": build.get("source"),
+        "mismatch": bool(source and running and running != source) or bool(build.get("stale")),
     }
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    from . import addon_install
+    from . import addon_build, addon_install
     from .bridge import Bridge, set_shared_bridge
     from .ipc import DaemonInfo, daemon_log_path
     from .profile import ProfileSnapshot, find_profile, list_profiles
@@ -198,7 +261,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ]
     profile = find_profile(settings.profile)
     report["profileSelected"] = str(profile.path) if profile else None
+    report["profileSource"] = profile.source if profile else None
     if profile:
+        report["addonBuild"] = addon_build.build_check(profile.path)
         snapshot = ProfileSnapshot.load(profile)
         report["accountsOnDisk"] = len(snapshot.accounts())
         report["outgoingServersOnDisk"] = len(snapshot.outgoing_servers())
@@ -326,6 +391,8 @@ def _transport_line(transport: dict) -> str:
 
 
 def _print_doctor(report: dict) -> None:
+    from .profile import SOURCE_LABELS, describe_profile, profile_mismatch
+
     def line(label: str, value: object) -> None:
         print(f"  {label:<26} {value}")
 
@@ -348,7 +415,11 @@ def _print_doctor(report: dict) -> None:
     line("add-on version (source)", addon.get("addonVersion"))
     versions = report.get("addonVersions") or {}
     line("add-on version (installed)", versions.get("installed") or "unknown")
+    line("add-on build (source)", versions.get("sourceBuild") or "unknown")
+    line("add-on build (installed)", versions.get("installedBuild") or "unknown")
     line("profile", report.get("profileSelected") or "NOT FOUND")
+    if report.get("profileSource"):
+        line("profile chosen by", SOURCE_LABELS[report["profileSource"]])
     if report.get("accountsOnDisk") is not None:
         line("accounts (from prefs.js)", report["accountsOnDisk"])
         line("outgoing servers", report["outgoingServersOnDisk"])
@@ -371,6 +442,15 @@ def _print_doctor(report: dict) -> None:
     line("daemon", f"pid {daemon.get('pid')}" if daemon.get("running") else "not running")
     line("daemon log", daemon.get("logFile") or "unknown")
     bridge = report.get("bridge") or {}
+    bridge_profile = bridge.get("profile") or {}
+    if bridge_profile.get("path"):
+        source = bridge_profile.get("source")
+        label = f" ({SOURCE_LABELS[source]})" if source in SOURCE_LABELS else ""
+        line("daemon profile", f"{bridge_profile['path']}{label}")
+        line(
+            "Thunderbird's profile",
+            ", ".join(bridge_profile.get("thunderbirdProfiles") or []) or "not on its command line",
+        )
     if bridge.get("error"):
         line("status", f"ERROR: {bridge['error']}")
     else:
@@ -402,7 +482,12 @@ def _print_doctor(report: dict) -> None:
 
     if bridge.get("connected") and versions.get("mismatch"):
         seen = versions.get("live") or versions.get("installed")
-        print(f"\nWarning: installed add-on is {seen}, source is {versions.get('source')} — run")
+        print(
+            f"\nWarning: installed add-on is {seen} "
+            f"(build {versions.get('installedBuild') or 'unknown'}), "
+            f"source is {versions.get('source')} "
+            f"(build {versions.get('sourceBuild') or 'unknown'}) — run"
+        )
         print("         `tbmcp install-addon` and restart Thunderbird to update it.")
 
     if not bridge.get("connected"):
@@ -411,13 +496,20 @@ def _print_doctor(report: dict) -> None:
         # Thunderbird is closed, or the user starts it and is back here in a minute.
         if versions.get("mismatch"):
             seen = versions.get("live") or versions.get("installed")
-            print(f"  * The installed add-on is {seen}, source is {versions.get('source')}.")
+            print(
+                f"  * The installed add-on is {seen} "
+                f"(build {versions.get('installedBuild') or 'unknown'}), "
+                f"source is {versions.get('source')} "
+                f"(build {versions.get('sourceBuild') or 'unknown'})."
+            )
             print("    Run `tbmcp install-addon` and restart Thunderbird.")
         if not addon.get("thunderbirdRunning"):
             print("  * Thunderbird is not running — start it.")
         else:
             failures = describe_handshake(bridge.get("handshake"))
-            if failures:
+            if profile_mismatch(bridge_profile):
+                paragraph(describe_profile(bridge_profile, running=True))
+            elif failures:
                 # It has dialled in, repeatedly. Anything below would be a guess that
                 # the record already contradicts.
                 paragraph(failures)
@@ -539,6 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="let mail_send actually send instead of drafting by default",
         )
         sub.add_argument("--timeout", type=float, help="per-call timeout in seconds (default 30)")
+        sub.add_argument("--config", help="folder rules file (default: <repo>/settings.json)")
 
     serve = subparsers.add_parser("serve", help="run the MCP server (default)")
     add_common(serve)
@@ -571,6 +664,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-restart", action="store_true", help="leave Thunderbird closed afterwards"
     )
     install.set_defaults(func=cmd_install_addon)
+
+    refresh = subparsers.add_parser(
+        "refresh", help="restart stale daemon code and update the add-on if needed"
+    )
+    refresh.add_argument("--profile")
+    refresh.set_defaults(func=cmd_refresh)
 
     doctor = subparsers.add_parser("doctor", help="diagnose the whole chain")
     add_common(doctor)

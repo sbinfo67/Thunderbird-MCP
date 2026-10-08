@@ -7,7 +7,8 @@ import pytest
 from tbmcp import safety
 from tbmcp.config import Settings
 from tbmcp.errors import BlockedError
-from tbmcp.safety import Consent, consent_for, guard_write, require
+from tbmcp.policy import FolderRule
+from tbmcp.safety import Consent, FolderPolicy, consent_for, guard_write, require
 
 pytestmark = pytest.mark.anyio
 
@@ -61,6 +62,36 @@ async def test_elicitation_capable_client_is_asked() -> None:
     # An Elicit marker, not a Consent: the framework turns it into a real prompt.
     assert type(outcome).__name__ == "Elicit"
     assert "send this message" in outcome.message
+
+
+async def test_folder_policy_skips_elicitation_only_in_scope(fake_bridge) -> None:
+    class Capabilities:
+        elicitation = {"form": True}
+
+    class Ctx:
+        client_capabilities = Capabilities()
+
+    bridge = fake_bridge(
+        {
+            "folders.get": lambda params: {
+                "folder": {
+                    "path": "/@BKToDo/x" if params["folderId"] == "inside" else "/Inbox",
+                    "accountId": "account1",
+                }
+            }
+        }
+    )
+    safety.set_settings(
+        Settings(folder_rules=(FolderRule("/@BKToDo", frozenset({"rename_subfolders"})),))
+    )
+    resolver = consent_for(
+        "rename a folder", folder_policy=FolderPolicy("rename_subfolders", strictly_below=True)
+    )
+    allowed = await resolver(folder_id="inside", confirm=False, ctx=Ctx())
+    outside = await resolver(folder_id="outside", confirm=False, ctx=Ctx())
+    assert isinstance(allowed, Consent) and allowed.approve
+    assert type(outside).__name__ == "Elicit"
+    assert bridge.methods() == ["folders.get", "folders.get"]
 
 
 async def test_capability_probe_failure_does_not_break_the_call() -> None:

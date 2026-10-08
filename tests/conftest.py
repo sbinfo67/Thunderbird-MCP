@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
+from tbmcp import addon_install, safety
 from tbmcp import bridge as bridge_module
-from tbmcp import safety
 from tbmcp.config import Settings
 
 
@@ -20,6 +20,11 @@ from tbmcp.config import Settings
 def anyio_backend() -> str:
     # The SDK is anyio-based; pinning asyncio keeps the suite off trio.
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def isolated_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("TBMCP_STATE_DIR", str(tmp_path))
 
 
 class FakeBridge:
@@ -97,3 +102,9 @@ def reset_settings():
     """Tool modules read the active policy from module state; keep tests isolated."""
     yield
     safety.set_settings(Settings())
+
+
+@pytest.fixture(autouse=True)
+def no_running_command_lines(monkeypatch):
+    monkeypatch.setattr(addon_install, "running_command_lines", lambda: [])
+    monkeypatch.setattr(addon_install, "saved_user_variable", lambda _name: None)

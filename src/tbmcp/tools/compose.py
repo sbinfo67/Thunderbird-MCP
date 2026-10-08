@@ -39,6 +39,7 @@ _MAILBOX = re.compile(r"^[^\s@<>,;]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.
 #: Thunderbird's own restriction on ComposeDetails.customHeaders, checked here so the
 #: model gets a fixable message instead of an ExtensionError from inside the add-on.
 _HEADER_NAME = re.compile(r"^(?:X-(?!Mozilla-)[A-Za-z0-9-]+|MSIP_Labels)$", re.IGNORECASE)
+_INLINE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 Priority = Literal["lowest", "low", "normal", "high", "highest"]
 DeliveryFormat = Literal["auto", "plaintext", "html", "both"]
@@ -104,6 +105,27 @@ def _attachments(paths: list[str] | None) -> list[dict[str, str]] | None:
     return clean
 
 
+def _inline_images(
+    images: dict[str, str] | None, *, body: str | None, is_html: bool
+) -> list[dict[str, str]] | None:
+    if not images:
+        return None
+    if not is_html:
+        raise UsageError("inline_images needs is_html=true and an HTML body.")
+    clean = []
+    for name, path in images.items():
+        if not _INLINE_NAME.fullmatch(name):
+            raise UsageError(
+                f"inline_images name {name!r} must use letters, digits, dots, underscores or hyphens."
+            )
+        if not str(path).strip():
+            raise UsageError(f"inline_images[{name!r}] needs a non-empty file path.")
+        if not body or (f'"cid:{name}"' not in body and f"'cid:{name}'" not in body):
+            raise UsageError(f'put <img src="cid:{name}"> in body where the picture belongs.')
+        clean.append({"cid": name, "path": str(path).strip()})
+    return clean
+
+
 def _headers(headers: dict[str, str] | None) -> list[dict[str, str]] | None:
     if not headers:
         return None
@@ -128,6 +150,7 @@ def _details(
     body: str | None = None,
     is_html: bool = False,
     attachments: list[str] | None = None,
+    inline_images: dict[str, str] | None = None,
     identity_id: str | None = None,
     priority: str | None = None,
     return_receipt: bool = False,
@@ -149,6 +172,7 @@ def _details(
         "body": body,
         "isHtml": bool(is_html),
         "attachments": _attachments(attachments),
+        "inlineImages": _inline_images(inline_images, body=body, is_html=is_html),
         "identityId": identity_id,
         "priority": priority,
         "deliveryFormat": delivery_format,
@@ -180,10 +204,14 @@ def _result(raw: dict[str, Any], mode: str, **extra: Any) -> dict[str, Any]:
     if mode in ("draft", "template"):
         payload["saved"] = True
         payload["draftId"] = raw.get("messageId")
+        location = (
+            f" in {folder}"
+            if folder
+            else "; Thunderbird did not report where. Find it with mail_search by subject"
+        )
         payload["note"] = (
-            f"Nothing was sent. The message is saved as a {mode}"
-            + (f" in {folder}" if folder else "")
-            + ". Tell the user it is waiting for them to read over, and repeat the call "
+            f"Nothing was sent. The message is saved as a {mode}{location}. "
+            "Tell the user it is waiting for them to read over, and repeat the call "
             'with mode="send" only once they have agreed.'
         )
     elif mode == "later":
@@ -209,6 +237,7 @@ def register(reg: Registrar) -> None:
         bcc: list[str] | None = None,
         is_html: bool = False,
         attachments: list[str] | None = None,
+        inline_images: dict[str, str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
         reply_to_message_id: int | None = None,
@@ -227,6 +256,8 @@ def register(reg: Registrar) -> None:
         asks for confirmation, because the identical call with `mode="send"` would
         deliver it. Set `reply_to_message_id` to thread the message under an existing
         one — but `mail_reply` is usually what you want, since it also quotes.
+        `inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+        an HTML body and set `is_html=true`.
         """
         guard_write("send mail")
         effective = _mode(mode)
@@ -238,6 +269,7 @@ def register(reg: Registrar) -> None:
             body=body,
             is_html=is_html,
             attachments=attachments,
+            inline_images=inline_images,
             identity_id=identity_id,
             priority=priority,
             return_receipt=return_receipt,
@@ -267,6 +299,7 @@ def register(reg: Registrar) -> None:
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         attachments: list[str] | None = None,
+        inline_images: dict[str, str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
         confirm: bool = False,
@@ -278,6 +311,8 @@ def register(reg: Registrar) -> None:
         `body` goes above the quote. `reply_all` copies everyone, `reply_to_list`
         answers the mailing list. Passing `cc` replaces the addresses Thunderbird
         derived, so leave it unset unless that is the intent.
+        `inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+        an HTML body and set `is_html=true`.
         """
         guard_write("send mail")
         effective = _mode(mode)
@@ -288,6 +323,7 @@ def register(reg: Registrar) -> None:
             body=body,
             is_html=is_html,
             attachments=attachments,
+            inline_images=inline_images,
             identity_id=identity_id,
         )
         params.update(
@@ -315,6 +351,7 @@ def register(reg: Registrar) -> None:
         subject: str | None = None,
         is_html: bool = False,
         attachments: list[str] | None = None,
+        inline_images: dict[str, str] | None = None,
         identity_id: str | None = None,
         mode: Literal["draft", "send", "later"] | None = None,
         confirm: bool = False,
@@ -325,6 +362,8 @@ def register(reg: Registrar) -> None:
         `inline` quotes the original in the body; `attachment` attaches it as a
         `.eml`, which preserves the headers a recipient may need. `body` is your
         covering note and goes above the forwarded text.
+        `inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+        an HTML body and set `is_html=true`.
         """
         guard_write("send mail")
         effective = _mode(mode)
@@ -336,6 +375,7 @@ def register(reg: Registrar) -> None:
             body=body,
             is_html=is_html,
             attachments=attachments,
+            inline_images=inline_images,
             identity_id=identity_id,
             require_recipients=True,
         )
@@ -362,6 +402,7 @@ def register(reg: Registrar) -> None:
         kind: Literal["draft", "template"] = "draft",
         is_html: bool = False,
         attachments: list[str] | None = None,
+        inline_images: dict[str, str] | None = None,
         identity_id: str | None = None,
     ) -> dict[str, Any]:
         """Save a message without sending it, as a draft or a template.
@@ -370,6 +411,8 @@ def register(reg: Registrar) -> None:
         thing to produce when you want the user to review before anything is sent.
         A template is the reusable kind: Thunderbird keeps it in Templates and opens
         a copy when the user picks it. Recipients are optional here, unlike a send.
+        `inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+        an HTML body and set `is_html=true`.
         """
         guard_write("save drafts")
         params = _details(
@@ -380,6 +423,7 @@ def register(reg: Registrar) -> None:
             body=body,
             is_html=is_html,
             attachments=attachments,
+            inline_images=inline_images,
             identity_id=identity_id,
         )
         params["mode"] = one_of(kind, ("draft", "template"), field="kind", default="draft")
@@ -395,6 +439,7 @@ def register(reg: Registrar) -> None:
         bcc: list[str] | None = None,
         is_html: bool = False,
         attachments: list[str] | None = None,
+        inline_images: dict[str, str] | None = None,
         identity_id: str | None = None,
         reply_to_message_id: int | None = None,
         forward_message_id: int | None = None,
@@ -407,6 +452,8 @@ def register(reg: Registrar) -> None:
         when the user declined a send: they get the draft in front of them with the
         cursor in it. Nothing is sent or saved, and the user sees the window appear,
         so this is not gated.
+        `inline_images` maps names to image paths; place `<img src="cid:NAME">` in
+        an HTML body and set `is_html=true`.
         """
         guard_write("open compose windows")
         if reply_to_message_id is not None and forward_message_id is not None:
@@ -422,6 +469,7 @@ def register(reg: Registrar) -> None:
             body=body,
             is_html=is_html,
             attachments=attachments,
+            inline_images=inline_images,
             identity_id=identity_id,
         )
         if reply_to_message_id is not None:

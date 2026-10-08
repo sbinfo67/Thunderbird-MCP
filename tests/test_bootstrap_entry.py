@@ -9,6 +9,8 @@ import pathlib
 import subprocess
 import sys
 
+from tbmcp import bootstrap
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -38,7 +40,7 @@ def test_module_imports_without_the_package_on_the_path(tmp_path):
         env=env,
     )
     assert done.returncode == 0, done.stderr
-    assert "1.3.0" in done.stdout
+    assert bootstrap.VERSION in done.stdout
 
 
 def test_root_shim_exists_and_delegates():
@@ -66,7 +68,7 @@ def test_root_shim_actually_runs_and_produces_the_five_key_contract(tmp_path):
     assert done.returncode in (0, 1), done.stderr
     payload = json.loads(done.stdout)
     assert set(payload) == {"ok", "version", "launcher", "steps", "next_command"}
-    assert payload["version"] == "1.3.0"
+    assert payload["version"] == bootstrap.VERSION
     assert payload["steps"]  # ran the real step sequence, not a stub
 
 

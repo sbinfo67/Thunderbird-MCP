@@ -13,7 +13,7 @@ import pytest
 from tbmcp import ipc
 from tbmcp.bridge import Bridge
 from tbmcp.daemon import Daemon
-from tbmcp.errors import TransportError
+from tbmcp.errors import NotConnectedError, TransportError
 from tbmcp.profile import ThunderbirdProfile
 
 pytestmark = pytest.mark.anyio
@@ -227,6 +227,31 @@ async def test_a_large_result_reaches_the_caller(isolated_state) -> None:
             assert await bridge.call("daemon.status", timeout=10.0) == result
         finally:
             await bridge.close()
+
+
+async def test_daemon_local_wait_propagates_not_connected_without_retry(monkeypatch) -> None:
+    bridge = Bridge(autostart=False)
+    bridge._writer = _StubWriter()  # type: ignore[assignment]
+    requests = []
+
+    async def ensure() -> None:
+        return None
+
+    async def write_message(_writer, frame) -> None:
+        requests.append(frame)
+        bridge._pending[frame["id"]].set_exception(NotConnectedError())
+
+    async def unexpected_wait() -> None:
+        raise AssertionError("daemon-local calls must not wait for attachment")
+
+    monkeypatch.setattr(bridge, "_ensure", ensure)
+    monkeypatch.setattr(bridge, "_wait_for_attachment", unexpected_wait)
+    monkeypatch.setattr(ipc, "write_message", write_message)
+
+    with pytest.raises(NotConnectedError):
+        await bridge.call("daemon.waitForThunderbird", {"timeout": 1}, timeout=2)
+
+    assert len(requests) == 1
 
 
 async def test_a_large_request_reaches_the_daemon(isolated_state) -> None:

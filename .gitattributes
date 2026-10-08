@@ -16,3 +16,7 @@
 *.xpi   binary
 *.png   binary
 *.ico   binary
+
+# Windows batch files must be CRLF - cmd.exe misparses LF-only scripts
+*.bat   text eol=crlf
+*.cmd   text eol=crlf

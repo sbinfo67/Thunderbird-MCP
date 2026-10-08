@@ -1,14 +1,15 @@
 /* Local file access for the bridge: read, write, stat.
  *
  * `files.read` exists so compose can attach a file the user names by path, and
- * `files.write` is what saving an attachment lands on. There is deliberately no
+ * `files.write` is a separate route for writing a local file. Saving an attachment
+ * calls core.js's `writeFile` directly. There is deliberately no
  * delete: nothing in this project needs one, and a privileged unlink driven by a
  * language model has a blast radius no confirmation prompt can shrink.
  *
  * core.js keeps its own `writeFile` because that one is declared in
  * experiment/schema.json and the background page calls it directly while saving an
- * attachment. `files.write` is the same operation reached through `invoke`, for the
- * Python layer. Two doors, one behaviour.
+ * attachment. `files.write` reaches the same shared decoder through `invoke`, for
+ * the Python layer.
  */
 
 TBX_MODULE_NAMES.push("files");
@@ -19,25 +20,11 @@ TBX_MODULE_NAMES.push("files");
    *  socket before anything can use them. */
   const MAX_READ_BYTES = 25 * 1024 * 1024;
 
-  /** base64 through ChromeUtils, which core.js documents as injected here; btoa and
-   *  atob are not part of what the extension sandbox guarantees. base64url differs
-   *  from base64 in exactly two characters, so the swap is lossless. */
+  /** Encode through ChromeUtils, which core.js documents as injected here. */
   function toBase64(bytes) {
     return ChromeUtils.base64URLEncode(bytes, { pad: true })
       .replace(/-/g, "+")
       .replace(/_/g, "/");
-  }
-
-  function fromBase64(text) {
-    const url = String(text)
-      .replace(/\s+/g, "")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_");
-    try {
-      return new Uint8Array(ChromeUtils.base64URLDecode(url, { padding: "ignore" }));
-    } catch (ex) {
-      throw H.usage("base64 was not decodable — send standard base64 for the file bytes");
-    }
   }
 
   function mimeFor(name) {
@@ -143,7 +130,7 @@ TBX_MODULE_NAMES.push("files");
     if (!params.overwrite && (await IOUtils.exists(path))) {
       throw H.blocked(`${path} already exists`, "overwrite=true, or a different filename");
     }
-    const bytes = fromBase64(base64);
+    const bytes = H.fromBase64(base64);
     // Write via a temp file and rename: a half-written attachment on disk is worse
     // than none, and the caller has already been told the write succeeded.
     await IOUtils.write(path, bytes, { tmpPath: `${path}.tmp` });

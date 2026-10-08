@@ -78,11 +78,12 @@ Thunderbird. Since Python owns the listener, exactly one process may bind it. He
 
 ### Pairing and auth
 
-The daemon picks a free port, then writes a connection file into the Thunderbird
-profile directory it discovered from `profiles.ini`:
+The daemon picks a free port, then writes a connection file into the running
+Thunderbird's profile, or the `profiles.ini` default if Thunderbird is closed. It
+moves the file when an auto-picked default differs from the profile Thunderbird starts with:
 
 ```jsonc
-// <profile>/tbmcp-bridge.json   (0600 on POSIX; ACL-restricted on Windows)
+// <profile>/tbmcp-bridge.json   (0600 on POSIX; ACL-restricted on Windows, see FILE-PERMISSIONS.md)
 { "version": 1, "port": 51234, "token": "<32 random bytes, base64url>", "pid": 4242 }
 ```
 
@@ -99,7 +100,7 @@ addon/                      the Thunderbird add-on (built into an XPI)
   background/               non-privileged half: transport + dispatch
   experiment/               privileged half: one module per capability area
 src/tbmcp/
-  cli.py                    tbmcp serve | daemon | doctor | install-addon | setup
+  cli.py                    tbmcp serve | daemon | doctor | install-addon | refresh | setup
   daemon.py                 broker: loopback listener + add-on session
   bridge.py                 RPC envelope, timeouts, cancellation
   server.py                 MCP server construction, toolset gating

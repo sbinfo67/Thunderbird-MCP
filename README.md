@@ -66,12 +66,15 @@ Zed. Use `python -m tbmcp serve` as the command, with an absolute interpreter pa
 
 ## Safety
 
-Reads are unrestricted. Anything that sends, deletes or changes configuration needs
+Reads are unrestricted. By default, anything that sends, deletes or changes configuration needs
 `confirm=true`, carries `destructiveHint`, and prompts for approval on clients that
 support elicitation. `mail_send` drafts unless told `mode="send"`; `dry_run_only`
 previews a write; preference writes are allowlisted and credentials, proxy and
 security prefs are refused at both layers. `--read-only` registers no mutating tool
 at all.
+
+To allow selected moves and folder changes without confirmation, configure
+[folder rules](docs/FOLDER-RULES.md).
 
 ## Toolsets
 
@@ -94,7 +97,7 @@ Full signatures in [docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md).
 | Tool | | What it does |
 | --- | --- | --- |
 | `mail_search` | read | Search the user's mail. Combine `full_text` with any filters below |
-| `mail_list` | read | List messages in one folder, newest first by default |
+| `mail_list` | read | List one folder or every folder of a type, newest first by default |
 | `mail_get` | read | Read one message. `text` gives headers plus the plain-text body |
 | `mail_get_many` | read | Read up to 50 messages in one round trip — for triaging a search result |
 | `mail_get_source` | read | Fetch a message's raw RFC 5322 source, for header forensics |
@@ -310,14 +313,25 @@ and names the broken one with the command that fixes it.
 | Symptom | What to do |
 | --- | --- |
 | "Thunderbird is not connected" | start Thunderbird; if it is running, `tbmcp doctor` says why the add-on has not attached |
+| Thunderbird runs but never attaches, and `doctor` shows two different profiles | set `TBMCP_PROFILE` or `--profile` to the directory Thunderbird uses, then restart the daemon and MCP client |
 | the add-on connects but never completes the handshake | restart Thunderbird; `doctor` shows both views and the daemon log's path |
-| `doctor` warns the installed add-on is older than the package | `tbmcp install-addon` |
+| `doctor` warns the installed add-on is older than the package | `tbmcp refresh` |
 | settings tools fail, mail tools work | the privileged half did not load → `tbmcp install-addon` |
 | full-text search finds nothing | the global indexer is off (Settings → General), or `search_global` names the words the index cannot match |
 | a dependency fails to load on Windows | Windows Application Control blocked a wheel; `python bootstrap.py` repairs it |
 
+The profile is chosen from `TBMCP_PROFILE` / `--profile`, then the running Thunderbird's
+`-profile` argument, then the stored Windows user variable, then the `profiles.ini` default.
+
 `TBMCP_DEBUG=1` logs verbosely to stderr; `TBMCP_STATE_DIR` moves the daemon's
 files; `tb_console` returns the add-on's `[tbmcp]` lines as a tool.
+
+**Action log:** Every write tool call appends one line to `actions-YYYY-MM-DD.jsonl`
+in the state directory, one file per UTC day. Each entry records the time, tool,
+arguments, outcome, and reply or error; replies include earlier values when
+available. The log can hold private mail content. Files older than 30 days are
+deleted automatically on the first write of a new day, so undo data is available
+for 30 days. Copy a file elsewhere to keep it longer.
 
 ## Requirements
 
@@ -333,6 +347,8 @@ node --test "tests/js/*.test.mjs"       # 111 add-on tests under node:vm
 ruff check . && ruff format --check .
 python tools/check_consistency.py       # the three layers still agree
 python tools/smoke_search.py            # live acceptance, against a running Thunderbird
+tools\install_addon.bat                 # after addon/ changes: build, install, restart Thunderbird, doctor
+tools\refresh_live.bat                  # refresh changed code, restart only when needed, doctor
 ```
 
 The add-on's real scripts run under `node:vm` against fakes of the WebExtension and

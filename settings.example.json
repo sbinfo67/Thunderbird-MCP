@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "path": "/@BKToDo",
+      "allow": [
+        "create_subfolders",
+        "rename_subfolders",
+        "delete_subfolders",
+        "move_in",
+        "move_out"
+      ]
+    }
+  ]
+}

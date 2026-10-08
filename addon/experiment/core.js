@@ -114,6 +114,19 @@ const H = {
     return value;
   },
 
+  /** The sandbox has no atob; ChromeUtils is injected here. */
+  fromBase64(text) {
+    const url = String(text)
+      .replace(/\s+/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    try {
+      return new Uint8Array(ChromeUtils.base64URLDecode(url, { padding: "ignore" }));
+    } catch (ex) {
+      throw H.usage("base64 was not decodable — send standard base64 for the file bytes");
+    }
+  },
+
   get accounts() {
     return needMod("MailServices").accounts;
   },
@@ -530,9 +543,7 @@ this.tbx = class extends ExtensionAPI {
               "overwrite=true, or a different filename"
             );
           }
-          const bytes = new Uint8Array(
-            Array.prototype.map.call(atob(base64), (c) => c.charCodeAt(0))
-          );
+          const bytes = H.fromBase64(base64);
           await IOUtils.write(path, bytes, { tmpPath: `${path}.tmp` });
           return { path, name: filename, bytes: bytes.length };
         },

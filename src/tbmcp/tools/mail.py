@@ -13,6 +13,7 @@ return envelope.
 from typing import Any, Literal
 
 from ..errors import UsageError
+from ..policy import grants
 from ..safety import (
     DESTRUCTIVE,
     IDEMPOTENT_WRITE,
@@ -35,6 +36,7 @@ from ._common import (
     require_ids,
     trim,
 )
+from .folders import SpecialUse
 
 
 def register(reg: Registrar) -> None:
@@ -64,12 +66,15 @@ def register(reg: Registrar) -> None:
         max_size: int | None = None,
         limit: int = 25,
         cursor: str | None = None,
+        sort: Literal["newest", "oldest", "none"] = "newest",
     ) -> dict[str, Any]:
         """Search the user's mail. Combine `full_text` with any filters below.
 
         `full_text` uses Thunderbird's global index and searches headers and bodies
         of already-indexed messages; `subject`/`author`/`body` are substring matches
-        evaluated per folder. Dates are ISO-8601. Results are summaries — call
+        evaluated per folder. Dates are ISO-8601. Results come newest first; `sort`
+        "oldest" reverses that, "none" returns folder storage order (faster on huge
+        result sets). Results are summaries — call
         `mail_get` for a body. Continue with `cursor=nextCursor`. A first page
         carries `scope` — the folder and account ids the query covered — so an empty
         result can be read against what was actually searched.
@@ -131,6 +136,7 @@ def register(reg: Registrar) -> None:
                 "query": query,
                 "limit": clamp(limit, default=25, minimum=1, maximum=200, field="limit"),
                 "cursor": cursor,
+                "sort": one_of(sort, ("newest", "oldest", "none"), field="sort", default="newest"),
             },
             timeout=90.0,
         )
@@ -148,23 +154,27 @@ def register(reg: Registrar) -> None:
             **reported,
         )
 
-    @reg.read_tool(title="List a folder")
+    @reg.read_tool(title="List mail")
     async def mail_list(
-        folder_id: str,
+        folder_id: str | None = None,
         limit: int = 25,
         cursor: str | None = None,
         sort_by: Literal["date", "subject", "author", "size", "read", "flagged"] = "date",
         descending: bool = True,
+        special_use: SpecialUse | None = None,
     ) -> dict[str, Any]:
-        """List messages in one folder, newest first by default.
+        """List one folder or every folder of a type, newest first by default.
 
-        Use `folder_list` to discover folder ids. For anything selective, prefer
-        `mail_search`.
+        `special_use="inbox"` lists the newest messages of every account's inbox
+        in one call — the answer to "what is my newest email". Use `folder_list`
+        to discover one folder's id. For selective queries, use `mail_search`.
         """
+        if bool(folder_id) == bool(special_use):
+            raise UsageError("Give exactly one of folder_id or special_use.")
         result = await call(
             "messages.list",
             {
-                "folderId": folder_id,
+                **({"folderId": folder_id} if folder_id else {"specialUse": special_use}),
                 "limit": clamp(limit, default=25, minimum=1, maximum=200, field="limit"),
                 "cursor": cursor,
                 "sortType": sort_by,
@@ -176,7 +186,8 @@ def register(reg: Registrar) -> None:
             [message_summary(m) for m in result.get("messages", [])],
             cursor=result.get("cursor"),
             total=result.get("totalAvailable"),
-            folderId=folder_id,
+            **({"folderId": folder_id} if folder_id else {}),
+            **({"folderIds": result["folderIds"]} if "folderIds" in result else {}),
         )
 
     # ------------------------------------------------------------------- reading
@@ -304,6 +315,7 @@ def register(reg: Registrar) -> None:
 
         Cheap and reversible, so no confirmation is required. Tag keys come from
         `mail_tags`.
+        The reply reports each updated message's earlier flags and tags for undo.
         """
         guard_write("change message flags")
         ids = require_ids(message_ids)
@@ -323,23 +335,40 @@ def register(reg: Registrar) -> None:
             },
             timeout=90.0,
         )
-        return {
-            "updated": result.get("updated", len(ids)),
-            "failures": result.get("failures") or [],
-        }
+        return changed(
+            "messages.mark",
+            before={"messages": result.get("previous") or []},
+            after={
+                **{
+                    key: value
+                    for key, value in (("read", read), ("flagged", flagged), ("junk", junk))
+                    if value is not None
+                },
+                "addTags": add_tags or [],
+                "removeTags": remove_tags or [],
+            },
+            updated=result.get("updated", len(ids)),
+            failures=result.get("failures") or [],
+        )
 
-    @reg.write_tool(title="Move messages", annotations=MUTATING)
+    @reg.write_tool(
+        title="Move messages",
+        annotations=MUTATING,
+        interactive=not grants(reg.settings.folder_rules, "move_in", "move_out"),
+    )
     async def mail_move(
         message_ids: list[int],
         destination_folder_id: str,
         confirm: bool = False,
-        consent: Gate("move these messages to another folder") = None,  # type: ignore[valid-type]
+        consent: Gate("move these messages to another folder", move_policy=True) = None,  # type: ignore[valid-type]
         dry_run_only: bool = False,
     ) -> dict[str, Any]:
         """Move messages into another folder.
 
         On IMAP the move is asynchronous — the tool waits for Thunderbird to confirm
         before returning, so a following search reflects the change.
+        Moves allowed in the tbmcp config skip confirmation.
+        The reply reports each message's source and any observed landing folder for undo.
         """
         guard_write("move messages")
         ids = require_ids(message_ids)
@@ -355,8 +384,12 @@ def register(reg: Registrar) -> None:
         )
         return changed(
             "messages.move",
-            before={"messageIds": ids, "folderIds": result.get("sourceFolderIds")},
-            after={"folderId": destination_folder_id},
+            before={
+                "messageIds": ids,
+                "folderIds": result.get("sourceFolderIds"),
+                "messages": result.get("previous") or [],
+            },
+            after={"folderId": destination_folder_id, "messages": result.get("landed") or []},
             moved=result.get("moved", len(ids)),
             note="Message ids change after a move; re-query to get the new ones.",
         )
@@ -368,7 +401,10 @@ def register(reg: Registrar) -> None:
         confirm: bool = False,
         consent: Gate("copy these messages to another folder") = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
-        """Copy messages into another folder, leaving the originals in place."""
+        """Copy messages into another folder, leaving the originals in place.
+
+        The reply reports each source and any observed copy location for undo.
+        """
         guard_write("copy messages")
         ids = require_ids(message_ids)
         require(consent, "copy these messages")
@@ -377,10 +413,13 @@ def register(reg: Registrar) -> None:
             {"messageIds": ids, "destinationFolderId": destination_folder_id},
             timeout=180.0,
         )
-        return {
-            "copied": result.get("copied", len(ids)),
-            "destinationFolderId": destination_folder_id,
-        }
+        return changed(
+            "messages.copy",
+            before={"messages": result.get("previous") or []},
+            after={"folderId": destination_folder_id, "messages": result.get("landed") or []},
+            copied=result.get("copied", len(ids)),
+            destinationFolderId=destination_folder_id,
+        )
 
     @reg.write_tool(title="Archive messages", annotations=MUTATING)
     async def mail_archive(
@@ -388,12 +427,20 @@ def register(reg: Registrar) -> None:
         confirm: bool = False,
         consent: Gate("archive these messages") = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
-        """Archive messages using each account's configured archive layout."""
+        """Archive messages using each account's configured archive layout.
+
+        The reply reports each source and any observed archive location for undo.
+        """
         guard_write("archive messages")
         ids = require_ids(message_ids)
         require(consent, "archive these messages")
         result = await call("messages.archive", {"messageIds": ids}, timeout=180.0)
-        return {"archived": result.get("archived", len(ids))}
+        return changed(
+            "messages.archive",
+            before={"messages": result.get("previous") or []},
+            after={"messages": result.get("landed") or []},
+            archived=result.get("archived", len(ids)),
+        )
 
     @reg.write_tool(title="Delete messages", annotations=DESTRUCTIVE)
     async def mail_delete(

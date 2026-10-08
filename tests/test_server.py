@@ -10,6 +10,7 @@ import pytest
 from mcp import Client
 
 from tbmcp.config import ALL_TOOLSETS, DEFAULT_TOOLSETS, Settings, parse_toolsets
+from tbmcp.policy import FolderRule
 from tbmcp.server import build_server
 
 pytestmark = pytest.mark.anyio
@@ -120,6 +121,15 @@ async def test_mutating_tools_ask_the_host_to_prompt() -> None:
         assert meta.get("anthropic/requiresUserInteraction") is True, (
             f"{tool.name} is gated but does not ask the host to prompt"
         )
+
+
+async def test_folder_rules_only_unprompt_granted_tools() -> None:
+    rules = (FolderRule("/@BKToDo", frozenset({"move_in"})),)
+    tools = await _all_tools(folder_rules=rules).list_tools()
+    meta = {tool.name: getattr(tool, "meta", None) or {} for tool in tools}
+    assert not meta["mail_move"].get("anthropic/requiresUserInteraction")
+    for name in ("folder_create", "folder_rename", "folder_delete"):
+        assert meta[name].get("anthropic/requiresUserInteraction") is True
 
 
 def test_default_toolset_is_a_lean_subset() -> None:
