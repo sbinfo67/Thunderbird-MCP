@@ -23,6 +23,12 @@
 
 ### Fixed
 
+- On Linux and macOS, `install-addon` left Thunderbird closed. Running Thunderbird
+  was found with `pgrep -f thunderbird`, which also matched this package's own
+  interpreter under `…/thunderbird-mcp/venv`, so the install sent SIGTERM to itself
+  before it could relaunch the mail client. Processes are now matched by name
+  (`thunderbird`, or `thunderbird-bin` on Debian and Ubuntu), and command lines are
+  read only from those processes.
 - `mail_draft_save` and `mail_send` no longer write `null` as the body when
   the body is missing or empty.
 - `install-addon`, `refresh` and `tools/tb_console.py` ask every Thunderbird window to
